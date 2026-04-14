@@ -253,6 +253,13 @@ func runInit() error {
 		fmt.Println("ok Hook configurado en Claude Code")
 	}
 
+	// Paso 7: Instalar slash commands
+	if err := hook.InstallCommands(); err != nil {
+		fmt.Fprintf(os.Stderr, "x Error instalando commands: %v\n", err)
+	} else {
+		fmt.Println("ok Commands instalados: /speak-on, /speak-off, /speak-voices")
+	}
+
 	fmt.Println()
 	fmt.Println("  agent-speech esta activo. Claude te hablara al terminar cada respuesta.")
 	fmt.Println("  Usa 'agent-speech off' para desactivar.")

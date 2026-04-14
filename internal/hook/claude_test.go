@@ -145,6 +145,124 @@ func TestIsEnabled_NoFile(t *testing.T) {
 	}
 }
 
+func TestInstallCommands_CreatesFiles(t *testing.T) {
+	claudeDir := setupClaudeDir(t)
+
+	if err := hook.InstallCommands(); err != nil {
+		t.Fatalf("InstallCommands: %v", err)
+	}
+
+	expected := []string{"speak-on.md", "speak-off.md", "speak-voices.md"}
+	for _, name := range expected {
+		path := filepath.Join(claudeDir, "commands", name)
+		if _, err := os.Stat(path); err != nil {
+			t.Errorf("InstallCommands: archivo %s no existe: %v", name, err)
+		}
+	}
+}
+
+func TestInstallCommands_FileContent(t *testing.T) {
+	claudeDir := setupClaudeDir(t)
+
+	if err := hook.InstallCommands(); err != nil {
+		t.Fatalf("InstallCommands: %v", err)
+	}
+
+	checks := map[string]string{
+		"speak-on.md":     "agent-speech on",
+		"speak-off.md":    "agent-speech off",
+		"speak-voices.md": "agent-speech voices",
+	}
+
+	for name, want := range checks {
+		path := filepath.Join(claudeDir, "commands", name)
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("leer %s: %v", name, err)
+		}
+		content := string(data)
+		if !containsString(content, want) {
+			t.Errorf("archivo %s no contiene %q", name, want)
+		}
+	}
+}
+
+func TestInstallCommands_Idempotent(t *testing.T) {
+	claudeDir := setupClaudeDir(t)
+
+	if err := hook.InstallCommands(); err != nil {
+		t.Fatalf("InstallCommands 1: %v", err)
+	}
+	if err := hook.InstallCommands(); err != nil {
+		t.Fatalf("InstallCommands 2: %v", err)
+	}
+
+	// Verificar que no hay duplicados (exactamente 3 archivos)
+	entries, err := os.ReadDir(filepath.Join(claudeDir, "commands"))
+	if err != nil {
+		t.Fatalf("ReadDir: %v", err)
+	}
+	if len(entries) != 3 {
+		t.Errorf("InstallCommands idempotente: got %d archivos, want 3", len(entries))
+	}
+}
+
+func TestRemoveCommands_DeletesFiles(t *testing.T) {
+	claudeDir := setupClaudeDir(t)
+
+	if err := hook.InstallCommands(); err != nil {
+		t.Fatalf("InstallCommands: %v", err)
+	}
+	if err := hook.RemoveCommands(); err != nil {
+		t.Fatalf("RemoveCommands: %v", err)
+	}
+
+	removed := []string{"speak-on.md", "speak-off.md", "speak-voices.md"}
+	for _, name := range removed {
+		path := filepath.Join(claudeDir, "commands", name)
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Errorf("RemoveCommands: archivo %s aun existe", name)
+		}
+	}
+}
+
+func TestRemoveCommands_NoErrorIfMissing(t *testing.T) {
+	setupClaudeDir(t)
+
+	// Llamar RemoveCommands sin haber instalado primero no debe fallar
+	if err := hook.RemoveCommands(); err != nil {
+		t.Fatalf("RemoveCommands sin archivos previos: %v", err)
+	}
+}
+
+func TestInstallCommands_CreatesDirIfMissing(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+	// No crear el directorio .claude/commands, InstallCommands debe crearlo
+
+	if err := hook.InstallCommands(); err != nil {
+		t.Fatalf("InstallCommands: %v", err)
+	}
+
+	commandsDir := filepath.Join(tmp, ".claude", "commands")
+	if _, err := os.Stat(commandsDir); err != nil {
+		t.Errorf("InstallCommands: directorio commands no fue creado: %v", err)
+	}
+}
+
+// containsString verifica si s contiene substr.
+func containsString(s, substr string) bool {
+	return len(s) >= len(substr) && (s == substr || len(substr) == 0 ||
+		func() bool {
+			for i := 0; i <= len(s)-len(substr); i++ {
+				if s[i:i+len(substr)] == substr {
+					return true
+				}
+			}
+			return false
+		}())
+}
+
 // countAgentSpeechHooks cuenta cuantas veces aparece agent-speech --from-hook en los hooks.
 func countAgentSpeechHooks(raw map[string]any) int {
 	count := 0

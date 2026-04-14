@@ -12,6 +12,60 @@ const (
 	hookTimeout = 120
 )
 
+// commands define los slash commands que agent-speech instala en ~/.claude/commands/.
+var commands = map[string]string{
+	"speak-on.md": "Ejecuta el siguiente comando para activar agent-speech:\n\n```bash\nagent-speech on\n```\n\nMuestra el resultado al usuario.\n",
+	"speak-off.md": "Ejecuta el siguiente comando para desactivar agent-speech:\n\n```bash\nagent-speech off\n```\n\nMuestra el resultado al usuario.\n",
+	"speak-voices.md": "Ejecuta el siguiente comando para listar las voces disponibles de agent-speech:\n\n```bash\nagent-speech voices\n```\n\nMuestra el resultado al usuario.\n",
+}
+
+// commandsDir retorna la ruta al directorio de commands de Claude Code.
+func commandsDir() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, ".claude", "commands"), nil
+}
+
+// InstallCommands crea los slash commands en ~/.claude/commands/.
+func InstallCommands() error {
+	dir, err := commandsDir()
+	if err != nil {
+		return fmt.Errorf("obtener directorio de commands: %w", err)
+	}
+
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("crear directorio commands: %w", err)
+	}
+
+	for name, content := range commands {
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			return fmt.Errorf("escribir command %s: %w", name, err)
+		}
+	}
+
+	return nil
+}
+
+// RemoveCommands elimina los slash commands de agent-speech de ~/.claude/commands/.
+func RemoveCommands() error {
+	dir, err := commandsDir()
+	if err != nil {
+		return fmt.Errorf("obtener directorio de commands: %w", err)
+	}
+
+	for name := range commands {
+		path := filepath.Join(dir, name)
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("eliminar command %s: %w", name, err)
+		}
+	}
+
+	return nil
+}
+
 
 // Init configura el hook Stop en ~/.claude/settings.json.
 func Init() error {
