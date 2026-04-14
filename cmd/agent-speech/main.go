@@ -185,8 +185,8 @@ func runSpeak(cmd *cobra.Command, args []string) error {
 }
 
 // readFromHook lee el JSON de stdin del hook de Claude Code y extrae los mensajes nuevos.
-// Si el watcher esta vivo, no hace nada (el watcher ya hablo).
-// Si el watcher esta muerto, ejecuta el fallback con lectura incremental por offset.
+// Siempre lee mensajes pendientes (flush de lo que el watcher no alcanzo a hablar).
+// Si el watcher no esta vivo, lo relanza en background para los proximos mensajes.
 func readFromHook() ([]string, error) {
 	data, err := io.ReadAll(os.Stdin)
 	if err != nil {
@@ -229,7 +229,34 @@ func readFromHook() ([]string, error) {
 		fmt.Fprintf(os.Stderr, "agent-speech: advertencia al guardar offset: %v\n", saveErr)
 	}
 
+	// Si el watcher no esta vivo, relanzarlo en background para que los proximos
+	// mensajes se lean en tiempo real sin depender de que el usuario abra una sesion nueva.
+	if !alive {
+		launchWatcher(input.TranscriptPath, input.SessionID) //nolint:errcheck
+	}
+
 	return messages, nil
+}
+
+// launchWatcher lanza el watcher como proceso background desacoplado.
+func launchWatcher(transcriptPath, sessionID string) error {
+	exe, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("obtener ruta del ejecutable: %w", err)
+	}
+
+	args := []string{"watch", transcriptPath}
+	if sessionID != "" {
+		args = append(args, "--session-id", sessionID)
+	}
+
+	cmd := exec.Command(exe, args...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	cmd.Stdin = nil
+	cmd.Stdout = nil
+	cmd.Stderr = nil
+
+	return cmd.Start()
 }
 
 // runStartWatcher lee el JSON del hook SessionStart de stdin y lanza el watcher en background.
@@ -261,23 +288,7 @@ func runStartWatcher() error {
 		}
 	}
 
-	// Lanzar watcher en background desacoplado del proceso padre.
-	exe, err := os.Executable()
-	if err != nil {
-		return fmt.Errorf("obtener ruta del ejecutable: %w", err)
-	}
-
-	watchArgs := []string{"watch", input.TranscriptPath}
-	if input.SessionID != "" {
-		watchArgs = append(watchArgs, "--session-id", input.SessionID)
-	}
-
-	cmd := exec.Command(exe, watchArgs...)
-	cmd.Stdout = nil
-	cmd.Stderr = nil
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
-
-	if err := cmd.Start(); err != nil {
+	if err := launchWatcher(input.TranscriptPath, input.SessionID); err != nil {
 		return fmt.Errorf("lanzar watcher: %w", err)
 	}
 
