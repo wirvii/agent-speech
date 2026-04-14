@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/wirvii/agent-speech/internal/engine"
+	"github.com/wirvii/agent-speech/internal/hook"
 )
 
 // mockEngine es un motor TTS de prueba que no habla nada.
@@ -249,6 +250,87 @@ func TestWatcherIdleTimeoutTriggersShutdown(t *testing.T) {
 	err := Run(ctx, transcriptPath, "", mock, engine.SpeakOpts{}, false)
 	if err != nil {
 		t.Errorf("Run deberia terminar sin error por timeout de contexto, got: %v", err)
+	}
+}
+
+// TestWatcherPollSavesSharedOffset verifica que poll() guarda el offset compartido
+// cuando el watcher tiene un sessionID. Esto permite que el Stop hook lea desde
+// donde el watcher se quedo y atrape mensajes que el watcher no alcanzo a hablar.
+func TestWatcherPollSavesSharedOffset(t *testing.T) {
+	dir := t.TempDir()
+	transcriptPath := filepath.Join(dir, "transcript.jsonl")
+
+	// Redirigir OffsetDir a un directorio temporal para no contaminar el sistema.
+	originalOffsetDir := hook.OffsetDir()
+	offsetDir := filepath.Join(dir, "offsets")
+	t.Setenv("HOME", dir) // hook.OffsetDir usa os.UserHomeDir -> HOME
+	_ = originalOffsetDir
+
+	f, err := os.Create(transcriptPath)
+	if err != nil {
+		t.Fatalf("crear transcript: %v", err)
+	}
+	defer f.Close()
+
+	sessionID := "test-session-save-offset"
+	mock := &mockEngine{}
+	w := New(transcriptPath, sessionID, mock, engine.SpeakOpts{}, false)
+	w.offset = 0
+
+	// Escribir un mensaje assistant.
+	writeTranscriptLine(t, f, "assistant", "Mensaje para el offset compartido.")
+
+	// Poll: debe detectar el mensaje Y guardar el offset.
+	entries, err := w.poll()
+	if err != nil {
+		t.Fatalf("poll: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("deberia detectar 1 entrada, got %d", len(entries))
+	}
+
+	// Verificar que el offset compartido fue guardado.
+	savedOffset, err := hook.LoadOffset(sessionID)
+	if err != nil {
+		t.Fatalf("cargar offset guardado: %v", err)
+	}
+	if savedOffset == 0 {
+		t.Error("el offset compartido deberia ser > 0 despues del poll")
+	}
+	if savedOffset != w.offset {
+		t.Errorf("offset compartido %d != offset del watcher %d", savedOffset, w.offset)
+	}
+
+	// Limpiar el archivo de offset.
+	os.Remove(filepath.Join(offsetDir, sessionID)) //nolint:errcheck
+}
+
+// TestWatcherPollNoSharedOffsetWithoutSessionID verifica que poll() NO guarda
+// el offset compartido cuando no hay sessionID (sin efectos secundarios).
+func TestWatcherPollNoSharedOffsetWithoutSessionID(t *testing.T) {
+	dir := t.TempDir()
+	transcriptPath := filepath.Join(dir, "transcript.jsonl")
+
+	// Sin HOME modificado: solo verificamos que no falla sin sessionID.
+	f, err := os.Create(transcriptPath)
+	if err != nil {
+		t.Fatalf("crear transcript: %v", err)
+	}
+	defer f.Close()
+
+	mock := &mockEngine{}
+	w := New(transcriptPath, "", mock, engine.SpeakOpts{}, false) // sessionID vacio
+	w.offset = 0
+
+	writeTranscriptLine(t, f, "assistant", "Mensaje sin session.")
+
+	// Poll no debe fallar aunque no haya sessionID.
+	entries, err := w.poll()
+	if err != nil {
+		t.Fatalf("poll sin sessionID: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("deberia detectar 1 entrada, got %d", len(entries))
 	}
 }
 

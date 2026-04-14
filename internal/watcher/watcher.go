@@ -204,6 +204,13 @@ func (w *Watcher) poll() ([]hook.TranscriptLine, error) {
 	}
 	w.offset = newOffset
 
+	// Guardar offset compartido para que el Stop hook sepa hasta donde llegamos.
+	// Esto permite que el hook Stop actue como "flush" del ultimo mensaje si el watcher
+	// no alcanzo a hacer poll antes de que Stop se disparara (race condition).
+	if w.sessionID != "" {
+		hook.SaveOffset(w.sessionID, newOffset) //nolint:errcheck
+	}
+
 	return entries, nil
 }
 

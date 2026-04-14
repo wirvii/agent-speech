@@ -202,21 +202,25 @@ func readFromHook() ([]string, error) {
 		return nil, fmt.Errorf("transcript_path vacio en el JSON del hook")
 	}
 
-	// Verificar si el watcher esta vivo: si lo esta, el watcher ya hablo.
+	// Verificar si el watcher esta vivo.
 	alive, _, _ := watcher.CheckAndClean()
-	if alive {
-		return nil, nil
-	}
 
-	// Watcher muerto o nunca se lanzo: fallback al comportamiento original.
+	// Siempre verificar si hay mensajes pendientes, incluso con watcher vivo.
+	// El watcher puede no haber hecho poll del ultimo mensaje todavia (race condition):
+	// Claude escribe el mensaje, Stop se dispara casi simultaneamente,
+	// y el watcher aun no alcanzo a hacer poll en ese intervalo de 300ms.
+	// El Stop hook actua como "flush" que atrapa cualquier mensaje rezagado.
 	offset, err := hook.LoadOffset(input.SessionID)
 	if err != nil {
-		// No es fatal: arrancar desde offset 0.
 		offset = 0
 	}
 
 	messages, newOffset, err := hook.ExtractNewAssistantMessages(input.TranscriptPath, offset)
 	if err != nil {
+		if alive {
+			// El watcher esta vivo y hay un error leyendo: no es fatal.
+			return nil, nil
+		}
 		return nil, err
 	}
 
