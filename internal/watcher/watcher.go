@@ -215,49 +215,27 @@ func (w *Watcher) poll() ([]hook.TranscriptLine, error) {
 }
 
 // speakEntry habla el contenido de una entrada del transcript.
-// Divide el texto en parrafos y habla cada uno con markdown.Clean().
+// Envia todo el texto como un solo bloque; edge-tts maneja las pausas naturales internamente.
 func (w *Watcher) speakEntry(ctx context.Context, entry hook.TranscriptLine) {
 	text := hook.ExtractTextFromEntry(entry)
 	if text == "" {
 		return
 	}
 
-	complete, residual := SplitParagraphs(text)
-
-	// Los parrafos completos se hablan secuencialmente.
-	allParagraphs := complete
-	if residual != "" {
-		allParagraphs = append(allParagraphs, residual)
+	// Limpiar markdown y enviar todo como un solo bloque.
+	clean := markdown.Clean(text)
+	if clean == "" {
+		return
 	}
 
-	for _, p := range allParagraphs {
+	if w.verbose {
+		log.Printf("watcher: hablando mensaje (%d chars)", len(clean))
+	}
+
+	if err := w.eng.Speak(ctx, clean, w.opts); err != nil {
 		if ctx.Err() != nil {
 			return
 		}
-
-		clean := markdown.Clean(p)
-		if clean == "" {
-			continue
-		}
-
-		if w.verbose {
-			log.Printf("watcher: hablando parrafo (%d chars): %s...", len(clean), truncateStr(clean, 50))
-		}
-
-		if err := w.eng.Speak(ctx, clean, w.opts); err != nil {
-			if ctx.Err() != nil {
-				return
-			}
-			log.Printf("watcher: error hablando parrafo: %v", err)
-			// No fatal: continuar con el siguiente parrafo.
-		}
+		log.Printf("watcher: error hablando: %v", err)
 	}
-}
-
-// truncateStr trunca un string a maxLen caracteres para logs.
-func truncateStr(s string, maxLen int) string {
-	if len(s) <= maxLen {
-		return s
-	}
-	return s[:maxLen] + "..."
 }

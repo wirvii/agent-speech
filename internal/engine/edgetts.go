@@ -42,11 +42,16 @@ func (e *EdgeTTS) Speak(ctx context.Context, text string, opts SpeakOpts) error 
 	defer os.Remove(tmpPath)
 
 	// Paso 1: Generar audio con edge-tts
-	genCmd := exec.CommandContext(ctx, "edge-tts",
-		"--voice", voice,
-		"--text", text,
-		"--write-media", tmpPath,
-	)
+	args := []string{"--voice", voice, "--text", text, "--write-media", tmpPath}
+
+	// Agregar rate: default +25% (mas rapido pero entendible); Rate>0 usa el valor directo como porcentaje.
+	rate := "+25%"
+	if opts.Rate > 0 {
+		rate = fmt.Sprintf("+%d%%", opts.Rate)
+	}
+	args = append(args, "--rate", rate)
+
+	genCmd := exec.CommandContext(ctx, "edge-tts", args...)
 	if err := genCmd.Run(); err != nil {
 		if ctx.Err() != nil {
 			return nil
@@ -60,8 +65,10 @@ func (e *EdgeTTS) Speak(ctx context.Context, text string, opts SpeakOpts) error 
 		return fmt.Errorf("edge-tts: %w", err)
 	}
 
-	args := append(playerArgs, tmpPath) //nolint:gocritic
-	playCmd := exec.CommandContext(ctx, player, args...)
+	playArgs := make([]string, len(playerArgs)+1)
+	copy(playArgs, playerArgs)
+	playArgs[len(playerArgs)] = tmpPath
+	playCmd := exec.CommandContext(ctx, player, playArgs...)
 	if err := playCmd.Run(); err != nil {
 		if ctx.Err() != nil {
 			return nil

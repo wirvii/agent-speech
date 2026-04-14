@@ -16,8 +16,8 @@ func TestDefaults(t *testing.T) {
 	if cfg.Engine != "auto" {
 		t.Errorf("Engine default: got %q, want %q", cfg.Engine, "auto")
 	}
-	if cfg.Rate != 0 {
-		t.Errorf("Rate default: got %d, want 0", cfg.Rate)
+	if cfg.Rate != 25 {
+		t.Errorf("Rate default: got %d, want 25", cfg.Rate)
 	}
 	if cfg.Verbose {
 		t.Error("Verbose default: got true, want false")

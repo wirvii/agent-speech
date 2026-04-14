@@ -22,7 +22,7 @@ func Defaults() *Config {
 	return &Config{
 		Lang:          "es",
 		Voice:         "",
-		Rate:          0,
+		Rate:          25,
 		Engine:        "auto",
 		Verbose:       false,
 		PiperModelDir: "~/.local/share/agent-speech/models",
@@ -93,8 +93,8 @@ lang = "es"
 # piper: "es_MX-claude-high", "es_MX-ald-medium", "en_US-lessac-medium"
 voice = ""
 
-# Velocidad en palabras por minuto (0 = default del motor)
-rate = 0
+# Velocidad: porcentaje de incremento (25 = +25% mas rapido, 0 = velocidad normal)
+rate = 25
 
 # Motor TTS: "auto" (detecta por OS), "say", "edge-tts", "kokoro", "piper"
 engine = "auto"
