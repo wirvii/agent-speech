@@ -160,8 +160,30 @@ func TestExtractTextFromContent_OnlyToolUse(t *testing.T) {
 	}
 }
 
-// TestExtractNewAssistantMessages_FromZero verifica lectura completa con offset 0.
-func TestExtractNewAssistantMessages_FromZero(t *testing.T) {
+// TestExtractNewAssistantMessages_FromZero_EmptyFile verifica que un transcript vacio con offset 0
+// se comporta normal: retorna 0 mensajes y offset 0.
+func TestExtractNewAssistantMessages_FromZero_EmptyFile(t *testing.T) {
+	tmp := t.TempDir()
+	path := filepath.Join(tmp, "transcript.jsonl")
+	if err := os.WriteFile(path, []byte(""), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	msgs, newOffset, err := hook.ExtractNewAssistantMessages(path, 0)
+	if err != nil {
+		t.Fatalf("ExtractNewAssistantMessages: %v", err)
+	}
+	if len(msgs) != 0 {
+		t.Fatalf("got %d mensajes, want 0", len(msgs))
+	}
+	if newOffset != 0 {
+		t.Errorf("newOffset = %d, want 0 para archivo vacio", newOffset)
+	}
+}
+
+// TestExtractNewAssistantMessages_NewSessionSkipsExisting verifica que cuando offset es 0
+// y el archivo ya tiene contenido, se salta al final sin leer mensajes viejos.
+func TestExtractNewAssistantMessages_NewSessionSkipsExisting(t *testing.T) {
 	lines := []map[string]any{
 		{
 			"type": "message", "role": "user",
@@ -182,17 +204,11 @@ func TestExtractNewAssistantMessages_FromZero(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ExtractNewAssistantMessages: %v", err)
 	}
-	if len(msgs) != 2 {
-		t.Fatalf("got %d mensajes, want 2", len(msgs))
-	}
-	if msgs[0] != "primer mensaje" {
-		t.Errorf("msgs[0] = %q, want %q", msgs[0], "primer mensaje")
-	}
-	if msgs[1] != "segundo mensaje" {
-		t.Errorf("msgs[1] = %q, want %q", msgs[1], "segundo mensaje")
+	if len(msgs) != 0 {
+		t.Fatalf("sesion nueva sobre transcript existente: got %d mensajes, want 0; msgs: %v", len(msgs), msgs)
 	}
 	if newOffset <= 0 {
-		t.Errorf("newOffset = %d, debe ser > 0", newOffset)
+		t.Errorf("newOffset = %d, debe ser > 0 (al final del archivo existente)", newOffset)
 	}
 }
 
@@ -212,10 +228,16 @@ func TestExtractNewAssistantMessages_FromOffset(t *testing.T) {
 
 	path := writeJSONL(t, firstLines)
 
-	// Primera lectura: offset 0 -> obtiene 2 mensajes y nuevo offset.
-	_, offsetAfterFirst, err := hook.ExtractNewAssistantMessages(path, 0)
+	// Primera lectura: offset 0 en archivo con contenido -> sesion nueva, salta al final, 0 mensajes.
+	firstMsgs, offsetAfterFirst, err := hook.ExtractNewAssistantMessages(path, 0)
 	if err != nil {
 		t.Fatalf("primera lectura: %v", err)
+	}
+	if len(firstMsgs) != 0 {
+		t.Fatalf("primera lectura (sesion nueva): got %d mensajes, want 0", len(firstMsgs))
+	}
+	if offsetAfterFirst <= 0 {
+		t.Fatalf("primera lectura: offsetAfterFirst = %d, debe ser > 0", offsetAfterFirst)
 	}
 
 	// Agregar 3 mensajes nuevos al archivo.
@@ -311,13 +333,16 @@ func TestExtractNewAssistantMessages_IncrementalReadFlow(t *testing.T) {
 	}
 	f.Close()
 
-	// Primera lectura.
+	// Primera lectura: offset 0 en archivo con contenido -> sesion nueva, salta al final, 0 mensajes.
 	msgs1, offset1, err := hook.ExtractNewAssistantMessages(path, 0)
 	if err != nil {
 		t.Fatalf("primera lectura: %v", err)
 	}
-	if len(msgs1) != 2 {
-		t.Fatalf("primera lectura: got %d mensajes, want 2", len(msgs1))
+	if len(msgs1) != 0 {
+		t.Fatalf("primera lectura (sesion nueva): got %d mensajes, want 0", len(msgs1))
+	}
+	if offset1 <= 0 {
+		t.Fatalf("primera lectura: offset1 = %d, debe ser > 0", offset1)
 	}
 
 	// Agregar 3 mensajes nuevos.
@@ -350,6 +375,161 @@ func TestExtractNewAssistantMessages_IncrementalReadFlow(t *testing.T) {
 		if msgs2[i] != want {
 			t.Errorf("msgs2[%d] = %q, want %q", i, msgs2[i], want)
 		}
+	}
+}
+
+// TestExtractLastAssistantMessage_LargeLineDoesNotBlock verifica que una linea > 1MB
+// (tipicamente un tool_result con screenshot o output largo) no bloquea la lectura
+// de los mensajes assistant que vienen despues.
+func TestExtractLastAssistantMessage_LargeLineDoesNotBlock(t *testing.T) {
+	tmp := t.TempDir()
+	path := filepath.Join(tmp, "transcript.jsonl")
+
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	enc := json.NewEncoder(f)
+
+	// Mensaje assistant antes de la linea grande.
+	if err := enc.Encode(map[string]any{
+		"type": "message", "role": "assistant",
+		"content": []map[string]any{{"type": "text", "text": "msg antes de linea grande"}},
+	}); err != nil {
+		f.Close()
+		t.Fatal(err)
+	}
+
+	// Linea tool_result de 2MB (simula screenshot de Playwright).
+	toolResult := map[string]any{
+		"type":    "tool_result",
+		"role":    "user",
+		"content": string(make([]byte, 2*1024*1024)), // 2MB de ceros
+	}
+	if err := enc.Encode(toolResult); err != nil {
+		f.Close()
+		t.Fatal(err)
+	}
+
+	// Mensaje assistant despues de la linea grande.
+	if err := enc.Encode(map[string]any{
+		"type": "message", "role": "assistant",
+		"content": []map[string]any{{"type": "text", "text": "msg despues de linea grande"}},
+	}); err != nil {
+		f.Close()
+		t.Fatal(err)
+	}
+	f.Close()
+
+	// ExtractLastAssistantMessage debe retornar el ultimo mensaje assistant,
+	// no detenerse en la linea de 2MB.
+	got, err := hook.ExtractLastAssistantMessage(path)
+	if err != nil {
+		t.Fatalf("ExtractLastAssistantMessage: %v", err)
+	}
+	if got != "msg despues de linea grande" {
+		t.Errorf("got %q, want %q", got, "msg despues de linea grande")
+	}
+}
+
+// TestExtractNewAssistantMessages_LargeLineDoesNotBlock verifica que una linea > 1MB
+// no bloquea la lectura incremental de mensajes assistant en ExtractNewAssistantMessages.
+func TestExtractNewAssistantMessages_LargeLineDoesNotBlock(t *testing.T) {
+	tmp := t.TempDir()
+	path := filepath.Join(tmp, "transcript.jsonl")
+
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	enc := json.NewEncoder(f)
+
+	// Mensaje assistant 1.
+	if err := enc.Encode(map[string]any{
+		"type": "message", "role": "assistant",
+		"content": []map[string]any{{"type": "text", "text": "assistant 1"}},
+	}); err != nil {
+		f.Close()
+		t.Fatal(err)
+	}
+
+	// Linea tool_result de 2MB.
+	toolResult := map[string]any{
+		"type":    "tool_result",
+		"role":    "user",
+		"content": string(make([]byte, 2*1024*1024)),
+	}
+	if err := enc.Encode(toolResult); err != nil {
+		f.Close()
+		t.Fatal(err)
+	}
+
+	// Mensaje assistant 2 (despues de la linea grande).
+	if err := enc.Encode(map[string]any{
+		"type": "message", "role": "assistant",
+		"content": []map[string]any{{"type": "text", "text": "assistant 2"}},
+	}); err != nil {
+		f.Close()
+		t.Fatal(err)
+	}
+	f.Close()
+
+	// Primera lectura con offset=0 y archivo con contenido: salta al final, 0 mensajes.
+	_, offset, err := hook.ExtractNewAssistantMessages(path, 0)
+	if err != nil {
+		t.Fatalf("primera lectura: %v", err)
+	}
+	if offset <= 0 {
+		t.Fatalf("primera lectura: offset = %d, debe ser > 0", offset)
+	}
+
+	// Agregar dos mensajes assistant nuevos.
+	f, err = os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	enc = json.NewEncoder(f)
+
+	// Otro tool_result grande entre los dos mensajes nuevos.
+	if err := enc.Encode(map[string]any{
+		"type":    "tool_result",
+		"role":    "user",
+		"content": string(make([]byte, 2*1024*1024)),
+	}); err != nil {
+		f.Close()
+		t.Fatal(err)
+	}
+	if err := enc.Encode(map[string]any{
+		"type": "message", "role": "assistant",
+		"content": []map[string]any{{"type": "text", "text": "nuevo 1"}},
+	}); err != nil {
+		f.Close()
+		t.Fatal(err)
+	}
+	if err := enc.Encode(map[string]any{
+		"type": "message", "role": "assistant",
+		"content": []map[string]any{{"type": "text", "text": "nuevo 2"}},
+	}); err != nil {
+		f.Close()
+		t.Fatal(err)
+	}
+	f.Close()
+
+	// Segunda lectura desde el offset guardado: debe retornar ambos mensajes nuevos.
+	msgs, _, err := hook.ExtractNewAssistantMessages(path, offset)
+	if err != nil {
+		t.Fatalf("segunda lectura: %v", err)
+	}
+	if len(msgs) != 2 {
+		t.Fatalf("got %d mensajes, want 2; msgs: %v", len(msgs), msgs)
+	}
+	if msgs[0] != "nuevo 1" {
+		t.Errorf("msgs[0] = %q, want %q", msgs[0], "nuevo 1")
+	}
+	if msgs[1] != "nuevo 2" {
+		t.Errorf("msgs[1] = %q, want %q", msgs[1], "nuevo 2")
 	}
 }
 

@@ -2,8 +2,10 @@ package hook
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -33,28 +35,28 @@ func ExtractLastAssistantMessage(path string) (string, error) {
 	defer f.Close()
 
 	var lastText string
-	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
-
-	for scanner.Scan() {
-		line := scanner.Bytes()
-		if len(line) == 0 {
-			continue
+	reader := bufio.NewReader(f)
+	for {
+		line, err := reader.ReadBytes('\n')
+		if len(line) > 0 {
+			// Pre-filtro: solo parsear lineas que puedan contener mensajes assistant.
+			// Evita parsear JSON de lineas grandes de tool_result u otras entradas irrelevantes.
+			if bytes.Contains(line, []byte(`"assistant"`)) {
+				var entry TranscriptLine
+				if jsonErr := json.Unmarshal(line, &entry); jsonErr == nil {
+					text := extractTextFromEntry(entry)
+					if text != "" {
+						lastText = text
+					}
+				}
+			}
 		}
-
-		var entry TranscriptLine
-		if err := json.Unmarshal(line, &entry); err != nil {
-			continue
+		if err != nil {
+			if err != io.EOF {
+				return "", fmt.Errorf("leer transcript: %w", err)
+			}
+			break
 		}
-
-		text := extractTextFromEntry(entry)
-		if text != "" {
-			lastText = text
-		}
-	}
-
-	if err := scanner.Err(); err != nil {
-		return "", fmt.Errorf("leer transcript: %w", err)
 	}
 
 	return lastText, nil
@@ -78,6 +80,8 @@ func extractTextFromEntry(entry TranscriptLine) string {
 // ExtractNewAssistantMessages lee el transcript JSONL desde el offset dado
 // y retorna todos los mensajes assistant nuevos + el nuevo offset.
 // Si fromOffset es mayor que el tamaño del archivo (transcript reiniciado), usa offset 0.
+// Si fromOffset es 0 y el archivo ya tiene contenido, es una sesion nueva que se abre sobre
+// un transcript existente: salta al final sin leer mensajes viejos.
 func ExtractNewAssistantMessages(path string, fromOffset int64) (messages []string, newOffset int64, err error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -85,43 +89,60 @@ func ExtractNewAssistantMessages(path string, fromOffset int64) (messages []stri
 	}
 	defer f.Close()
 
-	// Verificar si el archivo se trunco (nueva sesion) o el offset es valido.
-	info, err := f.Stat()
-	if err != nil {
-		return nil, 0, fmt.Errorf("stat transcript: %w", err)
-	}
-	if fromOffset > info.Size() {
-		fromOffset = 0
+	// Si es primera lectura (offset 0), saltar al final del archivo.
+	// Solo queremos mensajes nuevos a partir de ahora.
+	if fromOffset == 0 {
+		endOffset, err := f.Seek(0, 2)
+		if err != nil {
+			return nil, 0, fmt.Errorf("seek al final del transcript: %w", err)
+		}
+		// Si el archivo ya tiene contenido, es una sesion nueva sobre transcript existente.
+		// Saltar al final: no leer mensajes viejos.
+		if endOffset > 0 {
+			return nil, endOffset, nil
+		}
+		// Si esta vacio, continuar normal (transcript nuevo): seek de vuelta al inicio.
+		if _, err := f.Seek(0, 0); err != nil {
+			return nil, 0, fmt.Errorf("seek al inicio del transcript: %w", err)
+		}
 	}
 
+	// Verificar si el archivo se trunco (nueva sesion) o el offset es valido.
 	if fromOffset > 0 {
+		info, err := f.Stat()
+		if err != nil {
+			return nil, 0, fmt.Errorf("stat transcript: %w", err)
+		}
+		if fromOffset > info.Size() {
+			fromOffset = 0
+		}
 		if _, err := f.Seek(fromOffset, 0); err != nil {
 			return nil, 0, fmt.Errorf("seek transcript al offset %d: %w", fromOffset, err)
 		}
 	}
 
-	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
-
-	for scanner.Scan() {
-		line := scanner.Bytes()
-		if len(line) == 0 {
-			continue
+	reader := bufio.NewReader(f)
+	for {
+		line, readErr := reader.ReadBytes('\n')
+		if len(line) > 0 {
+			// Pre-filtro: solo parsear lineas que puedan contener mensajes assistant.
+			// Evita parsear JSON de lineas grandes de tool_result u otras entradas irrelevantes.
+			if bytes.Contains(line, []byte(`"assistant"`)) {
+				var entry TranscriptLine
+				if jsonErr := json.Unmarshal(line, &entry); jsonErr == nil {
+					text := extractTextFromEntry(entry)
+					if text != "" {
+						messages = append(messages, text)
+					}
+				}
+			}
 		}
-
-		var entry TranscriptLine
-		if err := json.Unmarshal(line, &entry); err != nil {
-			continue
+		if readErr != nil {
+			if readErr != io.EOF {
+				return nil, 0, fmt.Errorf("leer transcript: %w", readErr)
+			}
+			break
 		}
-
-		text := extractTextFromEntry(entry)
-		if text != "" {
-			messages = append(messages, text)
-		}
-	}
-
-	if err := scanner.Err(); err != nil {
-		return nil, 0, fmt.Errorf("leer transcript: %w", err)
 	}
 
 	// Obtener posicion final del archivo como nuevo offset.
