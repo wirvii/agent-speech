@@ -87,17 +87,19 @@ func WriteDefaults() error {
 lang = "es"
 
 # Voz especifica (vacio = default por idioma y motor)
+# edge-tts: "es-MX-DaliaNeural", "en-US-JennyNeural", etc.
+# kokoro: "ef_dora", "af_heart", etc.
 # macOS: "Paulina", "Juan", "Samantha", "Alex"
-# Linux: "es_MX-claude-high", "es_MX-ald-medium", "en_US-lessac-medium"
+# piper: "es_MX-claude-high", "es_MX-ald-medium", "en_US-lessac-medium"
 voice = ""
 
 # Velocidad en palabras por minuto (0 = default del motor)
 rate = 0
 
-# Motor TTS: "auto" (detecta por OS), "say", "piper"
+# Motor TTS: "auto" (detecta por OS), "say", "edge-tts", "kokoro", "piper"
 engine = "auto"
 
-# Directorio de modelos piper (solo Linux)
+# Directorio de modelos piper (solo si usas piper)
 piper_model_dir = "~/.local/share/agent-speech/models"
 
 # Logs detallados a stderr

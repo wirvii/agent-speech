@@ -75,7 +75,7 @@ Ejemplos:
 	rootCmd.PersistentFlags().StringVar(&flagLang, "lang", "", "idioma (es|en)")
 	rootCmd.PersistentFlags().StringVar(&flagVoice, "voice", "", "voz especifica")
 	rootCmd.PersistentFlags().IntVar(&flagRate, "rate", 0, "velocidad en palabras por minuto")
-	rootCmd.PersistentFlags().StringVar(&flagEngine, "engine", "", "motor TTS (auto|say|piper)")
+	rootCmd.PersistentFlags().StringVar(&flagEngine, "engine", "", "motor TTS (auto|say|edge-tts|kokoro|piper)")
 	rootCmd.PersistentFlags().BoolVar(&flagVerbose, "verbose", false, "logs a stderr")
 	rootCmd.PersistentFlags().BoolVar(&flagFromHook, "from-hook", false, "modo hook de Claude Code")
 
@@ -209,21 +209,21 @@ func runInit() error {
 	}
 	applyFlags(cfg)
 
-	// Paso 1: En Linux, asegurar que piper esta disponible
+	// Paso 1: En Linux, asegurar que hay algun motor disponible
 	if runtime.GOOS == "linux" {
-		if err := ensurePiper(); err != nil {
+		if err := ensureLinuxEngine(); err != nil {
 			fmt.Fprintf(os.Stderr, "x %v\n", err)
 			return nil
 		}
 	}
 
-	// Paso 2: Detectar motor (ahora debe encontrar piper)
+	// Paso 2: Detectar motor
 	eng, err := engine.Detect(cfg)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "x %v\n", err)
 		return nil
 	}
-	fmt.Printf("ok Motor detectado: %s\n", motorDisplayName(eng))
+	fmt.Printf("ok Motor seleccionado: %s\n", motorDisplayName(eng))
 
 	// Paso 3: Mostrar voz por defecto
 	defaultVoice := defaultVoiceForEngine(eng, cfg)
@@ -268,7 +268,51 @@ func runInit() error {
 	return nil
 }
 
+// ensureLinuxEngine verifica que al menos un motor TTS este disponible en Linux.
+// Si no hay ninguno, intenta instalar edge-tts automaticamente via pip.
+func ensureLinuxEngine() error {
+	// Verificar motores en orden de prioridad
+	if _, err := exec.LookPath("edge-tts"); err == nil {
+		fmt.Println("ok edge-tts encontrado")
+		return nil
+	}
+	if _, err := exec.LookPath("kokoro-tts"); err == nil {
+		fmt.Println("ok kokoro-tts encontrado")
+		return nil
+	}
+	if _, err := exec.LookPath("piper"); err == nil {
+		fmt.Println("ok piper encontrado")
+		return nil
+	}
+	if _, found := piper.BinPath(); found {
+		fmt.Println("ok piper encontrado (instalado internamente)")
+		return nil
+	}
+
+	// Ningun motor disponible, intentar instalar edge-tts automaticamente
+	fmt.Println("  Ningun motor TTS encontrado. Instalando edge-tts...")
+	installCmd := exec.Command("pip", "install", "--user", "edge-tts")
+	installCmd.Stdout = os.Stdout
+	installCmd.Stderr = os.Stderr
+	if err := installCmd.Run(); err != nil {
+		// Intentar con pip3
+		installCmd = exec.Command("pip3", "install", "--user", "edge-tts")
+		installCmd.Stdout = os.Stdout
+		installCmd.Stderr = os.Stderr
+		if err := installCmd.Run(); err != nil {
+			return fmt.Errorf(
+				"no se pudo instalar edge-tts automaticamente.\n" +
+					"  Instala manualmente: pip install edge-tts\n" +
+					"  O instala piper: agent-speech init (con piper en PATH)",
+			)
+		}
+	}
+	fmt.Println("ok edge-tts instalado")
+	return nil
+}
+
 // ensurePiper verifica que piper este disponible, instalandolo si es necesario.
+// Se usa cuando el motor explicitamente configurado es "piper".
 func ensurePiper() error {
 	// 1. Buscar en PATH
 	if _, err := exec.LookPath("piper"); err == nil {
@@ -360,7 +404,7 @@ func buildVoicesCmd() *cobra.Command {
 	}
 }
 
-// runVoices lista las voces disponibles.
+// runVoices lista las voces disponibles para todos los motores.
 func runVoices() error {
 	cfg, err := loadConfig()
 	if err != nil {
@@ -368,48 +412,108 @@ func runVoices() error {
 	}
 	applyFlags(cfg)
 
-	eng, err := engine.Detect(cfg)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "agent-speech: %v\n", err)
-		os.Exit(1)
+	// Detectar motor activo (puede fallar si ninguno disponible)
+	activeEngine, _ := engine.Detect(cfg)
+	activeName := ""
+	if activeEngine != nil {
+		activeName = activeEngine.Name()
 	}
 
-	switch eng.Name() {
-	case "say":
-		printSayVoices()
-	case "piper":
-		printPiperVoices(cfg)
+	// say (solo en macOS)
+	if runtime.GOOS == "darwin" {
+		sayEng := &engine.Say{}
+		printEngineVoices("say", "say (macOS)", sayEng.Available(), activeName == "say", func() {
+			fmt.Println("  Espanol:")
+			fmt.Println("    Paulina (default)")
+			fmt.Println("    Juan")
+			fmt.Println("  Ingles:")
+			fmt.Println("    Samantha (default)")
+			fmt.Println("    Alex")
+		})
 	}
+
+	// edge-tts
+	edgeAvail := false
+	if _, err := exec.LookPath("edge-tts"); err == nil {
+		edgeAvail = true
+	}
+	printEngineVoices("edge-tts", "edge-tts (Microsoft Neural)", edgeAvail, activeName == "edge-tts", func() {
+		fmt.Println("  Espanol:")
+		fmt.Println("    es-MX-DaliaNeural (default) — mexicana")
+		fmt.Println("    es-MX-JorgeNeural — mexicano")
+		fmt.Println("    es-CO-SalomeNeural — colombiana")
+		fmt.Println("    es-CO-GonzaloNeural — colombiano")
+		fmt.Println("    es-AR-ElenaNeural — argentina")
+		fmt.Println("    es-AR-TomasNeural — argentino")
+		fmt.Println("  Ingles:")
+		fmt.Println("    en-US-JennyNeural (default)")
+		fmt.Println("    en-US-GuyNeural")
+		fmt.Println("    en-US-AriaNeural")
+		fmt.Println("  (Mas voces: edge-tts --list-voices)")
+	})
+
+	// kokoro
+	kokoroAvail := false
+	if _, err := exec.LookPath("kokoro-tts"); err == nil {
+		kokoroAvail = true
+	}
+	printEngineVoices("kokoro", "kokoro (local, offline)", kokoroAvail, activeName == "kokoro", func() {
+		fmt.Println("  Espanol:")
+		fmt.Println("    ef_dora (default) — femenina")
+		fmt.Println("    em_alex — masculino")
+		fmt.Println("    em_santa — masculino")
+		fmt.Println("  Ingles:")
+		fmt.Println("    af_heart (default) — femenina")
+		fmt.Println("    af_bella — femenina")
+		fmt.Println("    af_sarah — femenina")
+		fmt.Println("    am_adam — masculino")
+		fmt.Println("    am_michael — masculino")
+		fmt.Println("  (Mas voces: kokoro-tts --help-voices)")
+	})
+
+	// piper
+	piperEng := buildPiperForVoices(cfg)
+	printEngineVoices("piper", "piper (local, offline)", piperEng.Available(), activeName == "piper", func() {
+		modelDir, _ := config.ExpandPath(cfg.PiperModelDir)
+		fmt.Println("  Espanol:")
+		printPiperModel("es_MX-claude-high", modelDir, true)
+		printPiperModel("es_MX-ald-medium", modelDir, false)
+		fmt.Println("  Ingles:")
+		printPiperModel("en_US-lessac-medium", modelDir, true)
+	})
+
 	return nil
 }
 
-// printSayVoices lista las voces de say en macOS.
-func printSayVoices() {
-	fmt.Println("Motor: say (macOS)")
-	fmt.Println()
-	fmt.Println("Idioma: es")
-	fmt.Println("  Paulina (default)")
-	fmt.Println("  Juan")
-	fmt.Println()
-	fmt.Println("Idioma: en")
-	fmt.Println("  Samantha (default)")
-	fmt.Println("  Alex")
+// printEngineVoices imprime el encabezado y voces de un motor con su estado.
+func printEngineVoices(name, displayName string, available, active bool, printVoices func()) {
+	status := "[no instalado]"
+	if available {
+		status = "[disponible]"
+	}
+	if active {
+		status = "[ACTIVO]"
+	}
+
+	fmt.Printf("\nMotor: %s %s\n", displayName, status)
+	if available || active {
+		printVoices()
+	}
 }
 
-// printPiperVoices lista los modelos piper disponibles.
-func printPiperVoices(cfg *config.Config) {
-	fmt.Println("Motor: piper (Linux)")
-
-	modelDir, _ := config.ExpandPath(cfg.PiperModelDir)
-
-	fmt.Println()
-	fmt.Println("Idioma: es")
-	printPiperModel("es_MX-claude-high", modelDir, true)
-	printPiperModel("es_MX-ald-medium", modelDir, false)
-
-	fmt.Println()
-	fmt.Println("Idioma: en")
-	printPiperModel("en_US-lessac-medium", modelDir, true)
+// buildPiperForVoices construye un Piper con la config para listar voces.
+func buildPiperForVoices(cfg *config.Config) *engine.Piper {
+	modelDir, err := config.ExpandPath(cfg.PiperModelDir)
+	if err != nil {
+		modelDir = cfg.PiperModelDir
+	}
+	p := &engine.Piper{ModelDir: modelDir}
+	if binPath, found := piper.BinPath(); found {
+		p.BinPath = binPath
+		binDir, _ := piper.BinDir()
+		p.BinDir = binDir
+	}
+	return p
 }
 
 // printPiperModel imprime un modelo con estado de descarga.
@@ -508,8 +612,12 @@ func motorDisplayName(eng engine.Engine) string {
 	switch eng.Name() {
 	case "say":
 		return "say (macOS)"
+	case "edge-tts":
+		return "edge-tts (Microsoft Neural)"
+	case "kokoro":
+		return "kokoro (local, offline)"
 	case "piper":
-		return "piper (Linux)"
+		return "piper (local, offline)"
 	default:
 		return eng.Name()
 	}
@@ -517,15 +625,22 @@ func motorDisplayName(eng engine.Engine) string {
 
 // defaultVoiceForEngine retorna la voz por defecto para el motor y idioma.
 func defaultVoiceForEngine(eng engine.Engine, cfg *config.Config) string {
-	if eng.Name() == "say" {
+	switch eng.Name() {
+	case "say":
 		return engine.DefaultVoiceSay(cfg.Lang)
-	}
-	// piper
-	info, err := piper.Resolve(cfg.Lang, "")
-	if err != nil {
+	case "edge-tts":
+		return engine.DefaultVoiceEdgeTTS(cfg.Lang)
+	case "kokoro":
+		return engine.DefaultVoiceKokoro(cfg.Lang)
+	case "piper":
+		info, err := piper.Resolve(cfg.Lang, "")
+		if err != nil {
+			return "desconocida"
+		}
+		return info.ID
+	default:
 		return "desconocida"
 	}
-	return info.ID
 }
 
 // langName retorna el nombre del idioma.
