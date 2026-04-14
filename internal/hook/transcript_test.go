@@ -160,6 +160,199 @@ func TestExtractTextFromContent_OnlyToolUse(t *testing.T) {
 	}
 }
 
+// TestExtractNewAssistantMessages_FromZero verifica lectura completa con offset 0.
+func TestExtractNewAssistantMessages_FromZero(t *testing.T) {
+	lines := []map[string]any{
+		{
+			"type": "message", "role": "user",
+			"content": []map[string]any{{"type": "text", "text": "hola"}},
+		},
+		{
+			"type": "message", "role": "assistant",
+			"content": []map[string]any{{"type": "text", "text": "primer mensaje"}},
+		},
+		{
+			"type": "message", "role": "assistant",
+			"content": []map[string]any{{"type": "text", "text": "segundo mensaje"}},
+		},
+	}
+
+	path := writeJSONL(t, lines)
+	msgs, newOffset, err := hook.ExtractNewAssistantMessages(path, 0)
+	if err != nil {
+		t.Fatalf("ExtractNewAssistantMessages: %v", err)
+	}
+	if len(msgs) != 2 {
+		t.Fatalf("got %d mensajes, want 2", len(msgs))
+	}
+	if msgs[0] != "primer mensaje" {
+		t.Errorf("msgs[0] = %q, want %q", msgs[0], "primer mensaje")
+	}
+	if msgs[1] != "segundo mensaje" {
+		t.Errorf("msgs[1] = %q, want %q", msgs[1], "segundo mensaje")
+	}
+	if newOffset <= 0 {
+		t.Errorf("newOffset = %d, debe ser > 0", newOffset)
+	}
+}
+
+// TestExtractNewAssistantMessages_FromOffset verifica lectura parcial desde offset > 0.
+func TestExtractNewAssistantMessages_FromOffset(t *testing.T) {
+	// Primera parte del transcript (2 mensajes assistant).
+	firstLines := []map[string]any{
+		{
+			"type": "message", "role": "assistant",
+			"content": []map[string]any{{"type": "text", "text": "msg1"}},
+		},
+		{
+			"type": "message", "role": "assistant",
+			"content": []map[string]any{{"type": "text", "text": "msg2"}},
+		},
+	}
+
+	path := writeJSONL(t, firstLines)
+
+	// Primera lectura: offset 0 -> obtiene 2 mensajes y nuevo offset.
+	_, offsetAfterFirst, err := hook.ExtractNewAssistantMessages(path, 0)
+	if err != nil {
+		t.Fatalf("primera lectura: %v", err)
+	}
+
+	// Agregar 3 mensajes nuevos al archivo.
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatalf("abrir para append: %v", err)
+	}
+	enc := json.NewEncoder(f)
+	for _, msg := range []string{"msg3", "msg4", "msg5"} {
+		line := map[string]any{
+			"type": "message", "role": "assistant",
+			"content": []map[string]any{{"type": "text", "text": msg}},
+		}
+		if err := enc.Encode(line); err != nil {
+			f.Close()
+			t.Fatalf("encode: %v", err)
+		}
+	}
+	f.Close()
+
+	// Segunda lectura desde el offset guardado: solo debe retornar los 3 nuevos.
+	msgs, _, err := hook.ExtractNewAssistantMessages(path, offsetAfterFirst)
+	if err != nil {
+		t.Fatalf("segunda lectura: %v", err)
+	}
+	if len(msgs) != 3 {
+		t.Fatalf("got %d mensajes, want 3; msgs: %v", len(msgs), msgs)
+	}
+	for i, want := range []string{"msg3", "msg4", "msg5"} {
+		if msgs[i] != want {
+			t.Errorf("msgs[%d] = %q, want %q", i, msgs[i], want)
+		}
+	}
+}
+
+// TestLoadSaveOffset_RoundTrip verifica que guardar y cargar el offset produce el mismo valor.
+func TestLoadSaveOffset_RoundTrip(t *testing.T) {
+	// Usar directorio temporal para offsets durante el test.
+	origOffsetDir := hook.OffsetDir()
+	_ = origOffsetDir // no usamos override, usamos tmp session ID unico
+
+	sessionID := "test-session-" + t.Name()
+	// Primero cargar: debe retornar 0 porque no existe.
+	got, err := hook.LoadOffset(sessionID)
+	if err != nil {
+		t.Fatalf("LoadOffset inicial: %v", err)
+	}
+	if got != 0 {
+		t.Errorf("LoadOffset inicial = %d, want 0", got)
+	}
+
+	// Guardar un offset.
+	want := int64(12345)
+	if err := hook.SaveOffset(sessionID, want); err != nil {
+		t.Fatalf("SaveOffset: %v", err)
+	}
+	defer func() {
+		// Limpiar el archivo creado.
+		os.Remove(filepath.Join(hook.OffsetDir(), sessionID))
+	}()
+
+	// Cargar de nuevo: debe retornar el valor guardado.
+	got, err = hook.LoadOffset(sessionID)
+	if err != nil {
+		t.Fatalf("LoadOffset post-save: %v", err)
+	}
+	if got != want {
+		t.Errorf("LoadOffset = %d, want %d", got, want)
+	}
+}
+
+// TestExtractNewAssistantMessages_IncrementalReadFlow verifica el flujo completo incremental:
+// primera lectura de 2 mensajes, luego agregar 3 y que la segunda lectura retorne solo los nuevos.
+func TestExtractNewAssistantMessages_IncrementalReadFlow(t *testing.T) {
+	tmp := t.TempDir()
+	path := filepath.Join(tmp, "transcript.jsonl")
+
+	// Escribir 2 mensajes iniciales.
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	enc := json.NewEncoder(f)
+	for _, msg := range []string{"inicial-1", "inicial-2"} {
+		line := map[string]any{
+			"type": "message", "role": "assistant",
+			"content": []map[string]any{{"type": "text", "text": msg}},
+		}
+		if err := enc.Encode(line); err != nil {
+			f.Close()
+			t.Fatal(err)
+		}
+	}
+	f.Close()
+
+	// Primera lectura.
+	msgs1, offset1, err := hook.ExtractNewAssistantMessages(path, 0)
+	if err != nil {
+		t.Fatalf("primera lectura: %v", err)
+	}
+	if len(msgs1) != 2 {
+		t.Fatalf("primera lectura: got %d mensajes, want 2", len(msgs1))
+	}
+
+	// Agregar 3 mensajes nuevos.
+	f, err = os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	enc = json.NewEncoder(f)
+	for _, msg := range []string{"nuevo-1", "nuevo-2", "nuevo-3"} {
+		line := map[string]any{
+			"type": "message", "role": "assistant",
+			"content": []map[string]any{{"type": "text", "text": msg}},
+		}
+		if err := enc.Encode(line); err != nil {
+			f.Close()
+			t.Fatal(err)
+		}
+	}
+	f.Close()
+
+	// Segunda lectura desde offset guardado.
+	msgs2, _, err := hook.ExtractNewAssistantMessages(path, offset1)
+	if err != nil {
+		t.Fatalf("segunda lectura: %v", err)
+	}
+	if len(msgs2) != 3 {
+		t.Fatalf("segunda lectura: got %d mensajes, want 3; msgs: %v", len(msgs2), msgs2)
+	}
+	for i, want := range []string{"nuevo-1", "nuevo-2", "nuevo-3"} {
+		if msgs2[i] != want {
+			t.Errorf("msgs2[%d] = %q, want %q", i, msgs2[i], want)
+		}
+	}
+}
+
 // writeJSONL escribe una lista de objetos como JSONL en un archivo temporal.
 func writeJSONL(t *testing.T, lines []map[string]any) string {
 	t.Helper()

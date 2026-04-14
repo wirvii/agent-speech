@@ -9,7 +9,6 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
-	"path/filepath"
 	"runtime"
 	"syscall"
 
@@ -105,39 +104,30 @@ func runSpeak(cmd *cobra.Command, args []string) error {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
-	var text string
+	var messages []string
 
 	if flagFromHook {
-		text, err = readFromHook()
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "agent-speech: error en modo hook: %v\n", err)
+		var hookErr error
+		messages, hookErr = readFromHook()
+		if hookErr != nil {
+			fmt.Fprintf(os.Stderr, "agent-speech: error en modo hook: %v\n", hookErr)
 			os.Exit(1)
 		}
 	} else {
-		data, err := io.ReadAll(os.Stdin)
-		if err != nil {
-			return fmt.Errorf("leer stdin: %w", err)
+		data, readErr := io.ReadAll(os.Stdin)
+		if readErr != nil {
+			return fmt.Errorf("leer stdin: %w", readErr)
 		}
-		text = string(data)
+		if len(data) > 0 {
+			messages = []string{string(data)}
+		}
 	}
 
-	if text == "" {
+	if len(messages) == 0 {
 		if !flagFromHook {
 			cmd.Help() //nolint:errcheck
 		}
 		return nil
-	}
-
-	cleanText := markdown.Clean(text)
-	if cleanText == "" {
-		if cfg.Verbose {
-			log.Println("texto vacio despues de limpiar markdown")
-		}
-		return nil
-	}
-
-	if cfg.Verbose {
-		log.Printf("texto limpio (%d chars): %s...", len(cleanText), truncate(cleanText, 50))
 	}
 
 	eng, err := engine.Detect(cfg)
@@ -156,33 +146,68 @@ func runSpeak(cmd *cobra.Command, args []string) error {
 		Rate:  cfg.Rate,
 	}
 
-	if err := eng.Speak(ctx, cleanText, opts); err != nil {
+	for _, text := range messages {
 		if ctx.Err() != nil {
 			return nil // interrupcion por SIGINT/SIGTERM
 		}
-		return fmt.Errorf("hablar: %w", err)
+
+		cleanText := markdown.Clean(text)
+		if cleanText == "" {
+			if cfg.Verbose {
+				log.Println("texto vacio despues de limpiar markdown")
+			}
+			continue
+		}
+
+		if cfg.Verbose {
+			log.Printf("texto limpio (%d chars): %s...", len(cleanText), truncate(cleanText, 50))
+		}
+
+		if err := eng.Speak(ctx, cleanText, opts); err != nil {
+			if ctx.Err() != nil {
+				return nil // interrupcion por SIGINT/SIGTERM
+			}
+			return fmt.Errorf("hablar: %w", err)
+		}
 	}
 
 	return nil
 }
 
-// readFromHook lee el JSON de stdin del hook de Claude Code y extrae el ultimo mensaje.
-func readFromHook() (string, error) {
+// readFromHook lee el JSON de stdin del hook de Claude Code y extrae los mensajes nuevos.
+// Usa lectura incremental por offset para no perder mensajes en turnos con multiples tool calls.
+func readFromHook() ([]string, error) {
 	data, err := io.ReadAll(os.Stdin)
 	if err != nil {
-		return "", fmt.Errorf("leer stdin: %w", err)
+		return nil, fmt.Errorf("leer stdin: %w", err)
 	}
 
 	var input hookInput
 	if err := json.Unmarshal(data, &input); err != nil {
-		return "", fmt.Errorf("parsear JSON del hook: %w", err)
+		return nil, fmt.Errorf("parsear JSON del hook: %w", err)
 	}
 
 	if input.TranscriptPath == "" {
-		return "", fmt.Errorf("transcript_path vacio en el JSON del hook")
+		return nil, fmt.Errorf("transcript_path vacio en el JSON del hook")
 	}
 
-	return hook.ExtractLastAssistantMessage(input.TranscriptPath)
+	offset, err := hook.LoadOffset(input.SessionID)
+	if err != nil {
+		// No es fatal: arrancar desde offset 0.
+		offset = 0
+	}
+
+	messages, newOffset, err := hook.ExtractNewAssistantMessages(input.TranscriptPath, offset)
+	if err != nil {
+		return nil, err
+	}
+
+	if saveErr := hook.SaveOffset(input.SessionID, newOffset); saveErr != nil {
+		// No es fatal: solo logear si verbose.
+		fmt.Fprintf(os.Stderr, "agent-speech: advertencia al guardar offset: %v\n", saveErr)
+	}
+
+	return messages, nil
 }
 
 // buildInitCmd construye el subcomando init.
@@ -308,34 +333,6 @@ func ensureLinuxEngine() error {
 		}
 	}
 	fmt.Println("ok edge-tts instalado")
-	return nil
-}
-
-// ensurePiper verifica que piper este disponible, instalandolo si es necesario.
-// Se usa cuando el motor explicitamente configurado es "piper".
-func ensurePiper() error {
-	// 1. Buscar en PATH
-	if _, err := exec.LookPath("piper"); err == nil {
-		fmt.Println("ok Motor detectado: piper (en PATH)")
-		return nil
-	}
-
-	// 2. Buscar en directorio interno
-	if _, found := piper.BinPath(); found {
-		fmt.Println("ok Motor detectado: piper (instalado internamente)")
-		return nil
-	}
-
-	// 3. Descargar e instalar
-	fmt.Println("  piper no encontrado en PATH, descargando...")
-	fmt.Printf("  Descargando piper para linux/%s...\n", runtime.GOARCH)
-
-	binPath, err := piper.Install()
-	if err != nil {
-		return fmt.Errorf("instalar piper: %w\n  Descarga manual: https://github.com/rhasspy/piper/releases", err)
-	}
-
-	fmt.Printf("ok piper instalado en %s\n", filepath.Dir(binPath))
 	return nil
 }
 

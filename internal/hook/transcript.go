@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 )
 
@@ -71,6 +73,105 @@ func extractTextFromEntry(entry TranscriptLine) string {
 		}
 	}
 	return ""
+}
+
+// ExtractNewAssistantMessages lee el transcript JSONL desde el offset dado
+// y retorna todos los mensajes assistant nuevos + el nuevo offset.
+// Si fromOffset es mayor que el tamaño del archivo (transcript reiniciado), usa offset 0.
+func ExtractNewAssistantMessages(path string, fromOffset int64) (messages []string, newOffset int64, err error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, 0, fmt.Errorf("abrir transcript %s: %w", path, err)
+	}
+	defer f.Close()
+
+	// Verificar si el archivo se trunco (nueva sesion) o el offset es valido.
+	info, err := f.Stat()
+	if err != nil {
+		return nil, 0, fmt.Errorf("stat transcript: %w", err)
+	}
+	if fromOffset > info.Size() {
+		fromOffset = 0
+	}
+
+	if fromOffset > 0 {
+		if _, err := f.Seek(fromOffset, 0); err != nil {
+			return nil, 0, fmt.Errorf("seek transcript al offset %d: %w", fromOffset, err)
+		}
+	}
+
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
+
+	for scanner.Scan() {
+		line := scanner.Bytes()
+		if len(line) == 0 {
+			continue
+		}
+
+		var entry TranscriptLine
+		if err := json.Unmarshal(line, &entry); err != nil {
+			continue
+		}
+
+		text := extractTextFromEntry(entry)
+		if text != "" {
+			messages = append(messages, text)
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		return nil, 0, fmt.Errorf("leer transcript: %w", err)
+	}
+
+	// Obtener posicion final del archivo como nuevo offset.
+	newOffset, err = f.Seek(0, 2)
+	if err != nil {
+		return nil, 0, fmt.Errorf("obtener offset final del transcript: %w", err)
+	}
+
+	return messages, newOffset, nil
+}
+
+// OffsetDir retorna el directorio de offsets: ~/.local/share/agent-speech/offsets/
+func OffsetDir() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return filepath.Join(".", ".local", "share", "agent-speech", "offsets")
+	}
+	return filepath.Join(home, ".local", "share", "agent-speech", "offsets")
+}
+
+// LoadOffset lee el byte offset guardado para una sesion.
+// Retorna 0 si el archivo no existe (primera lectura de la sesion).
+func LoadOffset(sessionID string) (int64, error) {
+	path := filepath.Join(OffsetDir(), sessionID)
+	data, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, fmt.Errorf("leer offset de sesion %s: %w", sessionID, err)
+	}
+	offset, err := strconv.ParseInt(strings.TrimSpace(string(data)), 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("parsear offset de sesion %s: %w", sessionID, err)
+	}
+	return offset, nil
+}
+
+// SaveOffset guarda el byte offset para una sesion.
+func SaveOffset(sessionID string, offset int64) error {
+	dir := OffsetDir()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("crear directorio de offsets: %w", err)
+	}
+	path := filepath.Join(dir, sessionID)
+	data := strconv.FormatInt(offset, 10) + "\n"
+	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+		return fmt.Errorf("guardar offset de sesion %s: %w", sessionID, err)
+	}
+	return nil
 }
 
 // ExtractTextFromContent extrae y concatena todos los bloques de texto de un campo content JSON.
