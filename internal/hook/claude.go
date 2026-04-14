@@ -8,8 +8,10 @@ import (
 )
 
 const (
-	hookCommand = "agent-speech --from-hook"
-	hookTimeout = 120
+	hookCommand        = "agent-speech --from-hook"
+	hookTimeout        = 120
+	watcherHookCommand = "agent-speech --start-watcher"
+	watcherHookTimeout = 10
 )
 
 // commands define los slash commands que agent-speech instala en ~/.claude/commands/.
@@ -170,49 +172,83 @@ func saveSettings(raw map[string]any) error {
 	return os.WriteFile(path, append(data, '\n'), 0o644)
 }
 
-// setHook agrega el hook de agent-speech al mapa raw.
-// Retorna true si lo agrego (no existia antes).
+// setHook agrega ambos hooks de agent-speech (Stop y SessionStart) al mapa raw.
+// Retorna true si agrego al menos uno (no existia antes).
 func setHook(raw map[string]any) bool {
 	hooks := ensureHooksMap(raw)
-	stopHooks := ensureStopList(hooks)
+	added := false
 
-	// Verificar si ya existe
+	// --- Hook Stop ---
+	stopHooks := ensureEventList(hooks, "Stop")
+	stopExists := false
 	for _, entry := range stopHooks {
 		m, ok := entry.(map[string]any)
 		if !ok {
 			continue
 		}
-		innerHooks := getInnerHooks(m)
-		for _, h := range innerHooks {
+		for _, h := range getInnerHooks(m) {
 			hm, ok := h.(map[string]any)
 			if !ok {
 				continue
 			}
 			if cmd, _ := hm["command"].(string); cmd == hookCommand {
-				return false // ya existe
+				stopExists = true
 			}
 		}
 	}
-
-	// Agregar el nuevo hook
-	newEntry := map[string]any{
-		"matcher": "",
-		"hooks": []any{
-			map[string]any{
-				"type":    "command",
-				"command": hookCommand,
-				"timeout": hookTimeout,
+	if !stopExists {
+		stopHooks = append(stopHooks, map[string]any{
+			"matcher": "",
+			"hooks": []any{
+				map[string]any{
+					"type":    "command",
+					"command": hookCommand,
+					"timeout": hookTimeout,
+				},
 			},
-		},
+		})
+		hooks["Stop"] = stopHooks
+		added = true
 	}
 
-	stopHooks = append(stopHooks, newEntry)
-	hooks["Stop"] = stopHooks
+	// --- Hook SessionStart ---
+	sessionHooks := ensureEventList(hooks, "SessionStart")
+	sessionExists := false
+	for _, entry := range sessionHooks {
+		m, ok := entry.(map[string]any)
+		if !ok {
+			continue
+		}
+		for _, h := range getInnerHooks(m) {
+			hm, ok := h.(map[string]any)
+			if !ok {
+				continue
+			}
+			if cmd, _ := hm["command"].(string); cmd == watcherHookCommand {
+				sessionExists = true
+			}
+		}
+	}
+	if !sessionExists {
+		sessionHooks = append(sessionHooks, map[string]any{
+			"matcher": "",
+			"hooks": []any{
+				map[string]any{
+					"type":    "command",
+					"command": watcherHookCommand,
+					"timeout": watcherHookTimeout,
+				},
+			},
+		})
+		hooks["SessionStart"] = sessionHooks
+		added = true
+	}
+
 	raw["hooks"] = hooks
-	return true
+	return added
 }
 
-// removeHook elimina el hook de agent-speech del mapa raw.
+// removeHook elimina ambos hooks de agent-speech (Stop y SessionStart) del mapa raw.
 func removeHook(raw map[string]any) {
 	hooksRaw, ok := raw["hooks"]
 	if !ok {
@@ -223,17 +259,27 @@ func removeHook(raw map[string]any) {
 		return
 	}
 
-	stopRaw, ok := hooks["Stop"]
+	removeCommandFromEvent(hooks, "Stop", hookCommand)
+	removeCommandFromEvent(hooks, "SessionStart", watcherHookCommand)
+
+	if len(hooks) == 0 {
+		delete(raw, "hooks")
+	}
+}
+
+// removeCommandFromEvent elimina un comando especifico de una lista de hooks de evento.
+func removeCommandFromEvent(hooks map[string]any, event, command string) {
+	eventRaw, ok := hooks[event]
 	if !ok {
 		return
 	}
-	stopList, ok := stopRaw.([]any)
+	eventList, ok := eventRaw.([]any)
 	if !ok {
 		return
 	}
 
 	var filtered []any
-	for _, entry := range stopList {
+	for _, entry := range eventList {
 		m, ok := entry.(map[string]any)
 		if !ok {
 			filtered = append(filtered, entry)
@@ -248,7 +294,7 @@ func removeHook(raw map[string]any) {
 				filteredInner = append(filteredInner, h)
 				continue
 			}
-			if cmd, _ := hm["command"].(string); cmd != hookCommand {
+			if cmd, _ := hm["command"].(string); cmd != command {
 				filteredInner = append(filteredInner, h)
 			}
 		}
@@ -260,17 +306,14 @@ func removeHook(raw map[string]any) {
 	}
 
 	if len(filtered) == 0 {
-		delete(hooks, "Stop")
+		delete(hooks, event)
 	} else {
-		hooks["Stop"] = filtered
-	}
-
-	if len(hooks) == 0 {
-		delete(raw, "hooks")
+		hooks[event] = filtered
 	}
 }
 
-// findHook retorna true si el hook de agent-speech esta en raw.
+// findHook retorna true si al menos uno de los hooks de agent-speech esta en raw.
+// Verifica tanto el hook Stop como el SessionStart.
 func findHook(raw map[string]any) bool {
 	hooksRaw, ok := raw["hooks"]
 	if !ok {
@@ -281,27 +324,32 @@ func findHook(raw map[string]any) bool {
 		return false
 	}
 
-	stopRaw, ok := hooks["Stop"]
+	return findCommandInEvent(hooks, "Stop", hookCommand) ||
+		findCommandInEvent(hooks, "SessionStart", watcherHookCommand)
+}
+
+// findCommandInEvent retorna true si un comando especifico esta en la lista de hooks de un evento.
+func findCommandInEvent(hooks map[string]any, event, command string) bool {
+	eventRaw, ok := hooks[event]
 	if !ok {
 		return false
 	}
-	stopList, ok := stopRaw.([]any)
+	eventList, ok := eventRaw.([]any)
 	if !ok {
 		return false
 	}
 
-	for _, entry := range stopList {
+	for _, entry := range eventList {
 		m, ok := entry.(map[string]any)
 		if !ok {
 			continue
 		}
-		innerHooks := getInnerHooks(m)
-		for _, h := range innerHooks {
+		for _, h := range getInnerHooks(m) {
 			hm, ok := h.(map[string]any)
 			if !ok {
 				continue
 			}
-			if cmd, _ := hm["command"].(string); cmd == hookCommand {
+			if cmd, _ := hm["command"].(string); cmd == command {
 				return true
 			}
 		}
@@ -326,17 +374,17 @@ func ensureHooksMap(raw map[string]any) map[string]any {
 	return hooks
 }
 
-// ensureStopList obtiene o crea la lista "Stop" en hooks.
-func ensureStopList(hooks map[string]any) []any {
-	stopRaw, ok := hooks["Stop"]
+// ensureEventList obtiene o crea la lista de hooks para un evento dado.
+func ensureEventList(hooks map[string]any, event string) []any {
+	raw, ok := hooks[event]
 	if !ok {
 		return []any{}
 	}
-	stopList, ok := stopRaw.([]any)
+	list, ok := raw.([]any)
 	if !ok {
 		return []any{}
 	}
-	return stopList
+	return list
 }
 
 // getInnerHooks obtiene la lista de hooks internos de un matcher.

@@ -44,7 +44,7 @@ func ExtractLastAssistantMessage(path string) (string, error) {
 			if bytes.Contains(line, []byte(`"assistant"`)) {
 				var entry TranscriptLine
 				if jsonErr := json.Unmarshal(line, &entry); jsonErr == nil {
-					text := extractTextFromEntry(entry)
+					text := ExtractTextFromEntry(entry)
 					if text != "" {
 						lastText = text
 					}
@@ -62,8 +62,9 @@ func ExtractLastAssistantMessage(path string) (string, error) {
 	return lastText, nil
 }
 
-// extractTextFromEntry extrae el texto de una linea del transcript.
-func extractTextFromEntry(entry TranscriptLine) string {
+// ExtractTextFromEntry extrae el texto de una linea del transcript.
+// Exportada para que el paquete watcher pueda reutilizarla.
+func ExtractTextFromEntry(entry TranscriptLine) string {
 	// Formato directo: {"type":"message","role":"assistant","content":[...]}
 	if entry.Role == "assistant" && entry.Content != nil {
 		return ExtractTextFromContent(entry.Content)
@@ -130,7 +131,7 @@ func ExtractNewAssistantMessages(path string, fromOffset int64) (messages []stri
 			if bytes.Contains(line, []byte(`"assistant"`)) {
 				var entry TranscriptLine
 				if jsonErr := json.Unmarshal(line, &entry); jsonErr == nil {
-					text := extractTextFromEntry(entry)
+					text := ExtractTextFromEntry(entry)
 					if text != "" {
 						messages = append(messages, text)
 					}

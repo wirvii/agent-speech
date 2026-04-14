@@ -11,6 +11,7 @@ import (
 	"os/signal"
 	"runtime"
 	"syscall"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -20,6 +21,7 @@ import (
 	"github.com/wirvii/agent-speech/internal/markdown"
 	"github.com/wirvii/agent-speech/internal/piper"
 	"github.com/wirvii/agent-speech/internal/updater"
+	"github.com/wirvii/agent-speech/internal/watcher"
 )
 
 // hookInput es el JSON que Claude Code pasa por stdin al disparar el hook Stop.
@@ -38,12 +40,13 @@ var (
 
 // flags globales
 var (
-	flagLang     string
-	flagVoice    string
-	flagRate     int
-	flagEngine   string
-	flagVerbose  bool
-	flagFromHook bool
+	flagLang         string
+	flagVoice        string
+	flagRate         int
+	flagEngine       string
+	flagVerbose      bool
+	flagFromHook     bool
+	flagStartWatcher bool
 )
 
 func main() {
@@ -77,6 +80,7 @@ Ejemplos:
 	rootCmd.PersistentFlags().StringVar(&flagEngine, "engine", "", "motor TTS (auto|say|edge-tts|kokoro|piper)")
 	rootCmd.PersistentFlags().BoolVar(&flagVerbose, "verbose", false, "logs a stderr")
 	rootCmd.PersistentFlags().BoolVar(&flagFromHook, "from-hook", false, "modo hook de Claude Code")
+	rootCmd.PersistentFlags().BoolVar(&flagStartWatcher, "start-watcher", false, "lanzar watcher (hook SessionStart)")
 
 	// Subcomandos
 	rootCmd.AddCommand(
@@ -86,6 +90,7 @@ Ejemplos:
 		buildVoicesCmd(),
 		buildDownloadCmd(),
 		buildUpdateCmd(),
+		buildWatchCmd(),
 	)
 
 	return rootCmd
@@ -93,6 +98,11 @@ Ejemplos:
 
 // runSpeak es el comando principal: lee stdin y habla.
 func runSpeak(cmd *cobra.Command, args []string) error {
+	// Modo --start-watcher: lanzar watcher en background (hook SessionStart).
+	if flagStartWatcher {
+		return runStartWatcher()
+	}
+
 	cfg, err := loadConfig()
 	if err != nil {
 		return fmt.Errorf("configuracion: %w", err)
@@ -175,7 +185,8 @@ func runSpeak(cmd *cobra.Command, args []string) error {
 }
 
 // readFromHook lee el JSON de stdin del hook de Claude Code y extrae los mensajes nuevos.
-// Usa lectura incremental por offset para no perder mensajes en turnos con multiples tool calls.
+// Si el watcher esta vivo, no hace nada (el watcher ya hablo).
+// Si el watcher esta muerto, ejecuta el fallback con lectura incremental por offset.
 func readFromHook() ([]string, error) {
 	data, err := io.ReadAll(os.Stdin)
 	if err != nil {
@@ -191,6 +202,13 @@ func readFromHook() ([]string, error) {
 		return nil, fmt.Errorf("transcript_path vacio en el JSON del hook")
 	}
 
+	// Verificar si el watcher esta vivo: si lo esta, el watcher ya hablo.
+	alive, _, _ := watcher.CheckAndClean()
+	if alive {
+		return nil, nil
+	}
+
+	// Watcher muerto o nunca se lanzo: fallback al comportamiento original.
 	offset, err := hook.LoadOffset(input.SessionID)
 	if err != nil {
 		// No es fatal: arrancar desde offset 0.
@@ -208,6 +226,102 @@ func readFromHook() ([]string, error) {
 	}
 
 	return messages, nil
+}
+
+// runStartWatcher lee el JSON del hook SessionStart de stdin y lanza el watcher en background.
+func runStartWatcher() error {
+	data, err := io.ReadAll(os.Stdin)
+	if err != nil {
+		return fmt.Errorf("leer stdin: %w", err)
+	}
+
+	var input hookInput
+	if err := json.Unmarshal(data, &input); err != nil {
+		return fmt.Errorf("parsear JSON del hook SessionStart: %w", err)
+	}
+
+	if input.TranscriptPath == "" {
+		return fmt.Errorf("transcript_path vacio en el JSON del hook SessionStart")
+	}
+
+	// Verificar si ya hay un watcher vivo.
+	alive, existingPID, existingTranscript := watcher.CheckAndClean()
+	if alive {
+		if existingTranscript == input.TranscriptPath {
+			// Ya hay un watcher monitoreando este mismo transcript.
+			return nil
+		}
+		// Watcher de otro transcript: matarlo y lanzar uno nuevo.
+		if killErr := watcher.KillExisting(existingPID, 2*time.Second); killErr != nil {
+			fmt.Fprintf(os.Stderr, "agent-speech: advertencia al matar watcher anterior: %v\n", killErr)
+		}
+	}
+
+	// Lanzar watcher en background desacoplado del proceso padre.
+	exe, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("obtener ruta del ejecutable: %w", err)
+	}
+
+	watchArgs := []string{"watch", input.TranscriptPath}
+	if input.SessionID != "" {
+		watchArgs = append(watchArgs, "--session-id", input.SessionID)
+	}
+
+	cmd := exec.Command(exe, watchArgs...)
+	cmd.Stdout = nil
+	cmd.Stderr = nil
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("lanzar watcher: %w", err)
+	}
+
+	// Fire-and-forget: no esperamos al proceso.
+	return nil
+}
+
+// buildWatchCmd construye el subcomando watch.
+func buildWatchCmd() *cobra.Command {
+	var flagSessionID string
+
+	cmd := &cobra.Command{
+		Use:   "watch <transcript_path>",
+		Short: "Monitorea un transcript JSONL y habla los mensajes del assistant en tiempo real",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runWatch(args[0], flagSessionID)
+		},
+	}
+	cmd.Flags().StringVar(&flagSessionID, "session-id", "", "identificador de sesion")
+	return cmd
+}
+
+// runWatch ejecuta el watcher loop.
+func runWatch(transcriptPath, sessionID string) error {
+	cfg, err := loadConfig()
+	if err != nil {
+		cfg = config.Defaults()
+	}
+	applyFlags(cfg)
+	setupLogging(cfg)
+
+	eng, err := engine.Detect(cfg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "agent-speech: watcher: %v\n", err)
+		os.Exit(1)
+	}
+
+	opts := engine.SpeakOpts{
+		Lang:  cfg.Lang,
+		Voice: cfg.Voice,
+		Rate:  cfg.Rate,
+	}
+
+	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer cancel()
+
+	return watcher.Run(ctx, transcriptPath, sessionID, eng, opts, cfg.Verbose)
 }
 
 // buildInitCmd construye el subcomando init.
