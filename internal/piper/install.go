@@ -126,10 +126,7 @@ func extractTarGz(tarPath, destDir string) error {
 		}
 
 		// Stripear prefijo "piper/" del primer nivel
-		name := header.Name
-		if strings.HasPrefix(name, "piper/") {
-			name = strings.TrimPrefix(name, "piper/")
-		}
+		name, _ := strings.CutPrefix(header.Name, "piper/")
 		// Entrada raiz "piper" o "piper/" — omitir
 		if name == "" || name == "." {
 			continue
