@@ -184,9 +184,8 @@ func runSpeak(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-// readFromHook lee el JSON de stdin del hook de Claude Code y extrae los mensajes nuevos.
-// Siempre lee mensajes pendientes (flush de lo que el watcher no alcanzo a hablar).
-// Si el watcher no esta vivo, lo relanza en background para los proximos mensajes.
+// readFromHook verifica que el watcher este vivo. Si no lo esta, lo relanza.
+// El Stop hook NUNCA habla: el watcher es el unico proceso que reproduce audio.
 func readFromHook() ([]string, error) {
 	data, err := io.ReadAll(os.Stdin)
 	if err != nil {
@@ -199,43 +198,17 @@ func readFromHook() ([]string, error) {
 	}
 
 	if input.TranscriptPath == "" {
-		return nil, fmt.Errorf("transcript_path vacio en el JSON del hook")
+		return nil, nil
 	}
 
-	// Verificar si el watcher esta vivo.
+	// Solo verificar que el watcher este vivo. Si no, relanzarlo.
 	alive, _, _ := watcher.CheckAndClean()
-
-	// Siempre verificar si hay mensajes pendientes, incluso con watcher vivo.
-	// El watcher puede no haber hecho poll del ultimo mensaje todavia (race condition):
-	// Claude escribe el mensaje, Stop se dispara casi simultaneamente,
-	// y el watcher aun no alcanzo a hacer poll en ese intervalo de 300ms.
-	// El Stop hook actua como "flush" que atrapa cualquier mensaje rezagado.
-	offset, err := hook.LoadOffset(input.SessionID)
-	if err != nil {
-		offset = 0
-	}
-
-	messages, newOffset, err := hook.ExtractNewAssistantMessages(input.TranscriptPath, offset)
-	if err != nil {
-		if alive {
-			// El watcher esta vivo y hay un error leyendo: no es fatal.
-			return nil, nil
-		}
-		return nil, err
-	}
-
-	if saveErr := hook.SaveOffset(input.SessionID, newOffset); saveErr != nil {
-		// No es fatal: solo logear si verbose.
-		fmt.Fprintf(os.Stderr, "agent-speech: advertencia al guardar offset: %v\n", saveErr)
-	}
-
-	// Si el watcher no esta vivo, relanzarlo en background para que los proximos
-	// mensajes se lean en tiempo real sin depender de que el usuario abra una sesion nueva.
 	if !alive {
 		launchWatcher(input.TranscriptPath, input.SessionID) //nolint:errcheck
 	}
 
-	return messages, nil
+	// El Stop hook NUNCA habla. El watcher se encarga de todo.
+	return nil, nil
 }
 
 // launchWatcher lanza el watcher como proceso background desacoplado.
