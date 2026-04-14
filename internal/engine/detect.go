@@ -5,6 +5,7 @@ import (
 	"runtime"
 
 	"github.com/wirvii/agent-speech/internal/config"
+	"github.com/wirvii/agent-speech/internal/piper"
 )
 
 // Detect retorna el motor TTS adecuado segun la plataforma y la configuracion.
@@ -26,7 +27,13 @@ func Detect(cfg *config.Config) (Engine, error) {
 		if err != nil {
 			modelDir = cfg.PiperModelDir
 		}
-		eng = &Piper{ModelDir: modelDir}
+		p := &Piper{ModelDir: modelDir}
+		if binPath, found := piper.BinPath(); found {
+			p.BinPath = binPath
+			binDir, _ := piper.BinDir()
+			p.BinDir = binDir
+		}
+		eng = p
 	case "auto":
 		switch runtime.GOOS {
 		case "darwin":
@@ -36,7 +43,13 @@ func Detect(cfg *config.Config) (Engine, error) {
 			if err != nil {
 				modelDir = cfg.PiperModelDir
 			}
-			eng = &Piper{ModelDir: modelDir}
+			p := &Piper{ModelDir: modelDir}
+			if binPath, found := piper.BinPath(); found {
+				p.BinPath = binPath
+				binDir, _ := piper.BinDir()
+				p.BinDir = binDir
+			}
+			eng = p
 		default:
 			return nil, fmt.Errorf("plataforma no soportada: %s", runtime.GOOS)
 		}
@@ -61,13 +74,10 @@ func unavailableError(eng Engine) error {
 		)
 	case "piper":
 		return fmt.Errorf(
-			"piper no encontrado en PATH.\n" +
-				"  Instala piper para tu distribucion:\n\n" +
-				"  Fedora/RHEL: pip install piper-tts\n" +
-				"  Ubuntu/Debian: pip install piper-tts\n" +
-				"  Arch: pip install piper-tts\n\n" +
-				"  O descarga el binario de:\n" +
-				"  https://github.com/OHF-Voice/piper1-gpl/releases",
+			"piper no encontrado.\n" +
+				"  Ejecuta 'agent-speech init' para instalarlo automaticamente.\n\n" +
+				"  O instala piper manualmente:\n" +
+				"  https://github.com/rhasspy/piper/releases",
 		)
 	default:
 		return fmt.Errorf("motor %q no disponible", eng.Name())

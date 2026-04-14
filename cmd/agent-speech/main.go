@@ -7,7 +7,10 @@ import (
 	"io"
 	"log"
 	"os"
+	"os/exec"
 	"os/signal"
+	"path/filepath"
+	"runtime"
 	"syscall"
 
 	"github.com/spf13/cobra"
@@ -204,47 +207,82 @@ func runInit() error {
 	}
 	applyFlags(cfg)
 
-	// Detectar motor
-	eng, err := engine.Detect(cfg)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "✗ %v\n", err)
-		return nil // no falla hard, muestra instrucciones
-	}
-	fmt.Printf("✓ Motor detectado: %s\n", motorDisplayName(eng))
-
-	// Mostrar voz por defecto
-	defaultVoice := defaultVoiceForEngine(eng, cfg)
-	fmt.Printf("✓ Voz por defecto: %s (%s)\n", defaultVoice, langName(cfg.Lang))
-
-	// En Linux: verificar y descargar modelo piper
-	if eng.Name() == "piper" {
-		if err := initPiperModel(cfg); err != nil {
-			fmt.Fprintf(os.Stderr, "✗ %v\n", err)
+	// Paso 1: En Linux, asegurar que piper esta disponible
+	if runtime.GOOS == "linux" {
+		if err := ensurePiper(); err != nil {
+			fmt.Fprintf(os.Stderr, "x %v\n", err)
+			return nil
 		}
 	}
 
-	// Crear config.toml
+	// Paso 2: Detectar motor (ahora debe encontrar piper)
+	eng, err := engine.Detect(cfg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "x %v\n", err)
+		return nil
+	}
+	fmt.Printf("ok Motor detectado: %s\n", motorDisplayName(eng))
+
+	// Paso 3: Mostrar voz por defecto
+	defaultVoice := defaultVoiceForEngine(eng, cfg)
+	fmt.Printf("ok Voz por defecto: %s (%s)\n", defaultVoice, langName(cfg.Lang))
+
+	// Paso 4: En Linux, verificar y descargar modelo piper
+	if eng.Name() == "piper" {
+		if err := initPiperModel(cfg); err != nil {
+			fmt.Fprintf(os.Stderr, "x %v\n", err)
+		}
+	}
+
+	// Paso 5: Crear config.toml
 	cfgPath, _ := config.ConfigPath()
 	if _, err := os.Stat(cfgPath); os.IsNotExist(err) {
 		if err := config.WriteDefaults(); err != nil {
-			fmt.Fprintf(os.Stderr, "✗ Error creando config: %v\n", err)
+			fmt.Fprintf(os.Stderr, "x Error creando config: %v\n", err)
 		} else {
-			fmt.Printf("✓ Config creada: %s\n", cfgPath)
+			fmt.Printf("ok Config creada: %s\n", cfgPath)
 		}
 	} else {
-		fmt.Printf("✓ Config existente: %s\n", cfgPath)
+		fmt.Printf("ok Config existente: %s\n", cfgPath)
 	}
 
-	// Configurar hook en Claude Code
+	// Paso 6: Configurar hook en Claude Code
 	if err := hook.Enable(); err != nil {
-		fmt.Fprintf(os.Stderr, "✗ Error configurando hook: %v\n", err)
+		fmt.Fprintf(os.Stderr, "x Error configurando hook: %v\n", err)
 	} else {
-		fmt.Println("✓ Hook configurado en Claude Code")
+		fmt.Println("ok Hook configurado en Claude Code")
 	}
 
 	fmt.Println()
 	fmt.Println("  agent-speech esta activo. Claude te hablara al terminar cada respuesta.")
 	fmt.Println("  Usa 'agent-speech off' para desactivar.")
+	return nil
+}
+
+// ensurePiper verifica que piper este disponible, instalandolo si es necesario.
+func ensurePiper() error {
+	// 1. Buscar en PATH
+	if _, err := exec.LookPath("piper"); err == nil {
+		fmt.Println("ok Motor detectado: piper (en PATH)")
+		return nil
+	}
+
+	// 2. Buscar en directorio interno
+	if _, found := piper.BinPath(); found {
+		fmt.Println("ok Motor detectado: piper (instalado internamente)")
+		return nil
+	}
+
+	// 3. Descargar e instalar
+	fmt.Println("  piper no encontrado en PATH, descargando...")
+	fmt.Printf("  Descargando piper para linux/%s...\n", runtime.GOARCH)
+
+	binPath, err := piper.Install()
+	if err != nil {
+		return fmt.Errorf("instalar piper: %w\n  Descarga manual: https://github.com/rhasspy/piper/releases", err)
+	}
+
+	fmt.Printf("ok piper instalado en %s\n", filepath.Dir(binPath))
 	return nil
 }
 
