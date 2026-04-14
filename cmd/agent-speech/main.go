@@ -20,6 +20,7 @@ import (
 	"github.com/wirvii/agent-speech/internal/hook"
 	"github.com/wirvii/agent-speech/internal/markdown"
 	"github.com/wirvii/agent-speech/internal/piper"
+	"github.com/wirvii/agent-speech/internal/updater"
 )
 
 // hookInput es el JSON que Claude Code pasa por stdin al disparar el hook Stop.
@@ -85,6 +86,7 @@ Ejemplos:
 		buildOffCmd(),
 		buildVoicesCmd(),
 		buildDownloadCmd(),
+		buildUpdateCmd(),
 	)
 
 	return rootCmd
@@ -536,6 +538,56 @@ func langName(lang string) string {
 	default:
 		return lang
 	}
+}
+
+// buildUpdateCmd construye el subcomando update.
+func buildUpdateCmd() *cobra.Command {
+	var flagForce bool
+
+	cmd := &cobra.Command{
+		Use:   "update",
+		Short: "Actualiza agent-speech a la ultima version disponible",
+		Long: `Consulta GitHub releases, descarga el binario mas reciente para esta
+plataforma y lo reemplaza atomicamente. Luego ejecuta init como post-install.`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runUpdate(flagForce)
+		},
+	}
+	cmd.Flags().BoolVar(&flagForce, "force", false, "actualizar aunque ya tengas la ultima version")
+	return cmd
+}
+
+const agentSpeechRepo = "wirvii/agent-speech"
+
+// runUpdate ejecuta el flujo de actualizacion.
+func runUpdate(force bool) error {
+	fmt.Printf("  Version actual: %s\n", version)
+
+	latest, err := updater.CheckLatest(agentSpeechRepo)
+	if err != nil {
+		return fmt.Errorf("consultar ultima version: %w", err)
+	}
+	fmt.Printf("  Ultima version: %s\n", latest)
+
+	if !updater.NeedsUpdate(version, latest) && !force {
+		fmt.Printf("ok Ya tienes la ultima version\n")
+		return nil
+	}
+
+	fmt.Printf("  Descargando agent-speech %s para %s/%s...\n", latest, runtime.GOOS, runtime.GOARCH)
+
+	if err := updater.Update(agentSpeechRepo, latest); err != nil {
+		return fmt.Errorf("actualizar binario: %w", err)
+	}
+	fmt.Println("ok Binario actualizado")
+
+	fmt.Println("  Ejecutando post-install...")
+	if err := runInit(); err != nil {
+		fmt.Fprintf(os.Stderr, "x Error en post-install: %v\n", err)
+	}
+
+	fmt.Printf("ok agent-speech actualizado a %s\n", latest)
+	return nil
 }
 
 // truncate trunca un string a maxLen caracteres.
